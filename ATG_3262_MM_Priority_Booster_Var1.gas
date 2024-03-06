@@ -1,0 +1,818 @@
+Program.Sub.ScreenSU.Start
+Program.Sub.ScreenSU.End
+
+Program.Sub.Preflight.Start
+
+Variable.UDT.Job_Ops.Define("Runtime",Float)
+Variable.UDT.Job_Ops.Define("Booster",Long)
+Variable.UDT.Job_Ops.Define("Job",String,"JOB")
+Variable.UDT.Job_Ops.Define("Suffix",String,"SUFFIX")
+Variable.UDT.Job_Ops.Define("WC",String,"PART")
+Variable.UDT.Jobs.Define("Job",String,"JOB")
+Variable.UDT.Jobs.Define("Suffix",String,"SUFFIX")
+Variable.UDT.Jobs.Define("Base_Priority",Long)
+Variable.UDT.Jobs.Define("New_Priority",Long)
+Variable.UDT.Jobs.Define("Log",String)
+Variable.UDT.Jobs.Define("bDirty",Long)
+Variable.UDT.Jobs.Define("DueDate",Date)
+Variable.UDT.Jobs.Define("Current_Priority",Long)
+Variable.UDT.Jobs.Define("CloseDate",String,"DATE_CLOSED")
+Variable.UDT.Jobs.Define("Recorded",Long)
+Variable.UDT.Jobs.Define("DateStart",Date)
+Variable.uGlobal.uJobs.Declare("Jobs")
+Variable.Global.sFile.Declare(String)
+Variable.UDT.JobDMachine.Define("Job",String,JOB)
+Variable.UDT.JobDMachine.Define("Suffix",String,SUFFIX)
+Variable.UDT.JobDMachine.Define("Seq",String,Seq)
+Variable.UDT.JobDMachine.Define("Machine",String,MACHINE)
+Variable.uGlobal.uMachine.Declare("JobDMachine")
+Variable.uGlobal.uAllJobs.Declare("Jobs")
+Variable.Global.AppRun.Declare(Date,1/1/1999)
+Variable.UDT.Booster_Days.Define("Days",Long,DAYS)
+Variable.UDT.Booster_Days.Define("Booster",Long,BOOSTER)
+Variable.uGlobal.uBDays.Declare("Booster_Days")
+Variable.UDT.Booster_Hours.Define("Hours",Float,HOURS)
+Variable.UDT.Booster_Hours.Define("WC",String,WC)
+Variable.UDT.Booster_Hours.Define("Booster",Long,BOOSTER)
+Variable.uGlobal.uBHours.Declare("Booster_Hours")
+Variable.Global.iGBooster.Declare(Long,0)
+Variable.uGlobal.uJobO.Declare("Job_Ops")
+Variable.Global.bLaborBoost.Declare(Boolean,False)
+Variable.Global.bLog.Declare(Boolean,True)
+Variable.Global.bAPS.Declare(Boolean,True)
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+'Coded by: SMC
+'Project Start Date: 3/15/2011
+'Hooks:
+'  Task Scheduler Hook
+'Other Components:
+'  APS 83
+'Notes:
+'  Quote 2022 for Customer Micro Machine:
+'
+'  Description:
+'  Alter WC on job sequences and boost priority based on a set of critieria.
+'
+'  Specification:
+'  A GAB script will be written that will run through the Task scheduler.
+'
+'  A. It will change the WC, on any labor sequence line where Actual time has been charged, from the WC or WG originally called out, to be whatever WC was used on the job detail table. The original WC and WG will not be preserved.  The first WC found will be the one
+'  	used for the swap, if a job sequence has been worked on more than one work center.
+'  B. The priority will be the copied into a new table keyed of job, and suffix storing the base priority.
+'  C. The script will then evaluate the need for boosting the priority on the jobs based on a new table.
+'  	#1 - work currently scheduled to start within the next x days will be boosted by AAA from its base priority. This will be based on a new table and a GAB script for inputting the boost value based on days.
+'  	#2 - WC for run-times that exceed X hours boosted by YYY from its base priority. Multiple values per WC can be entered. This will be based on a new table and a GAB script for inputting the boost value based on WC run-times.
+'  	#3 - If labor is already charged to the job then an additional boost value of Z could be apllied to the already boosted value from 1 and 2.  The ZZZ value will be a global value that could be applied to all job.
+'  D. The GAB script will then call the SYS050 process to download the scheduling files and then call the APS 83 schedule.
+'  E. Work Order header would be update to support storing the base priority field on a new field. GAB scripts will need to be written to support the saving of the data and loading of the data from the database. If the base priority is changed by the user then the script
+'  	will update the information to the following the rules above to the job.
+'
+'  The boost values will have to be added MANUALLY to the table provide.  A spec will be provided on how this will be done.
+'
+'  Deliverables:
+'  GAB Script - process changes
+'  GAB Script - Save load base priortiy to WO header
+'  CORE Change - Additional fields to screen for GAB use.
+'  Table - Store base priority off job suffix
+'  Table - Store boost values by day range (AAA), WC (YYY), and global boost (ZZZ)
+
+'4/8/11:  Bob asked what it would take to boost a job only ONCE by the hours condition.  I would add a "Hours_Booster" and "Hours_Log_Line" element to uJobs.  When I sort through Job_Ops udt in Evaluate_Hours (Near bottom), I would post the booster and log line
+'here IF it was greater than the last value, instead of adding to New_Priority and calling log line.  In Boost_Jobs, I would do the add of this before actually updating the priority
+'
+
+V.Local.sError.Declare(String)
+V.Local.sParams.Declare(String)
+V.Local.sFile.Declare(String)
+V.Local.bExists.Declare(Boolean)
+
+F.Intrinsic.Control.SetErrorHandler("Main_Err")
+F.Intrinsic.Control.ClearErrors
+
+F.ODBC.Connection!conx.OpenConnection(V.Ambient.PDSN,V.Ambient.PUser,V.Ambient.PPass,1000)
+F.Intrinsic.String.Concat(V.Caller.TempDir,"\ATG_MM_Priority_Booster_NO_LOG.txt",V.Local.sFile)
+F.Intrinsic.File.Exists(V.Local.sFile,V.Local.bExists)
+F.Intrinsic.Control.If(V.Local.bExists,=,True)
+	V.Global.bLog.Set(False)
+F.Intrinsic.Control.Else
+	V.Global.bLog.Set(True)
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.String.Concat(V.Caller.TempDir,"\ATG_MM_Priority_Booster_NO_APS.txt",V.Local.sFile)
+F.Intrinsic.File.Exists(V.Local.sFile,V.Local.bExists)
+F.Intrinsic.Control.If(V.Local.bExists,=,True)
+	V.Global.bAPS.Set(False)
+F.Intrinsic.Control.Else
+	V.Global.bAPS.Set(True)
+F.Intrinsic.Control.EndIf
+'V.Global.bAPS.Set(True)
+F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+F.Intrinsic.Debug.SetLA("APS: ",V.Global.bAPS)
+F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+
+F.Intrinsic.UI.InvokeWaitDialog("Downloading Scheduling Files ...","Priority Booster")
+F.Intrinsic.Debug.SetLA("***Download Scheduling to commit Family of Parts Priorities***")
+F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+F.Intrinsic.String.Format(V.Ambient.Now,"YYYYMMDD",V.Local.sParams)
+F.Intrinsic.String.Concat("SI!*!",V.Local.sParams,"!*!1",V.Local.sParams)
+F.Intrinsic.Control.If(V.Global.bAPS,=,True)
+	F.Global.General.CallWrapperSync(500000,V.Local.sParams)
+F.Intrinsic.Control.EndIf
+F.Intrinsic.Debug.SetLA("***Completed Download of Scheduling files***")
+F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+V.Global.AppRun.Set(V.Ambient.Now)
+'F.Intrinsic.Date.DateSerial(2012,1,11,V.Global.AppRun)
+F.Intrinsic.UI.InvokeWaitDialog("Loading data to memory ...","Priority Booster")
+F.Intrinsic.Control.CallSub(Load_udts)
+F.Intrinsic.UI.InvokeWaitDialog("Recording Base Priorities and Calculating Boosters ...","Priority Booster")
+F.Intrinsic.Control.CallSub(Record_priorities)
+F.Intrinsic.UI.ChangeWaitStatus("Calculating Day Booster ...")
+F.Intrinsic.Control.CallSub(Evaluate_days)
+F.Intrinsic.Variable.UDTMultiQuickSort(V.uGlobal.uJobs!Job,False,V.uGlobal.uJobs!Suffix,False)
+F.Intrinsic.UI.InvokeWaitDialog("Calculating Labor Booster...","Priority Booster")
+F.Intrinsic.Control.CallSub(Evaluate_labor)
+'F.Intrinsic.UI.InvokeWaitDialog("Swapping Workcenters...","Priority Booster")
+'F.Intrinsic.Control.CallSub(Swap_wcs)
+F.Intrinsic.UI.InvokeWaitDialog("Calculating Hours Booster...","Priority Booster")
+F.Intrinsic.Control.CallSub(Evaluate_hours)
+F.Intrinsic.UI.ChangeWaitStatus("Boosting Jobs ...")
+F.Intrinsic.Control.CallSub(Boost_jobs)
+F.Intrinsic.UI.CloseWaitDialog
+F.Intrinsic.Debug.SetLA("***Ending Program***")
+F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+
+F.ODBC.Connection!conx.Close
+F.Intrinsic.Control.End
+
+F.Intrinsic.Control.Label("Main_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+F.Intrinsic.Control.End
+
+
+
+Program.Sub.Main.End
+
+Program.Sub.Swap_WCs.Start
+'  A. It will change the WC, on any labor sequence line where Actual time has been charged, from the WC or WG originally called out, to be whatever WC was used on the job detail table. The original WC and WG will not be preserved.  The first WC found will be the one
+'  	used for the swap, if a job sequence has been worked on more than one work center.
+V.Local.sError.Declare(String)
+V.Local.sQuery.Declare(String)
+V.Local.sOpWC.Declare(String)
+V.Local.sDetailWC.Declare(String)
+V.Local.sJobs.Declare(String)
+V.uGlobal.uMachine.Redim(-1,-1)
+V.Local.iPos.Declare(Long)
+
+V.Local.sRet.Declare(String)
+
+F.Intrinsic.Control.SetErrorHandler("Swap_WCs_Err")
+F.Intrinsic.Control.ClearErrors
+
+F.ODBC.Connection!conx.OpenRecordsetRW("rstOps","SELECT JOB, SUFFIX, SEQ, PART, LMO FROM JOB_OPERATIONS WHERE LMO='L' AND FLAG_CLOSED<>'Y' ORDER BY JOB ASC, SUFFIX ASC, SEQ ASC")
+F.Intrinsic.Control.DoUntil(V.ODBC.conx!rstOps.EOF,=,True)
+	F.Intrinsic.Variable.UDTMultiSeekNoTrim(V.uGlobal.uJobs!Job,V.ODBC.conx!rstOps.FieldVal!JOB,V.uGlobal.uJobs!Suffix,V.ODBC.conx!rstOps.FieldVal!SUFFIX,V.Local.sJobs)
+	F.Intrinsic.Control.If(V.Local.sJobs,<>,"")
+		F.Intrinsic.Variable.UDTMultiSeekNoTrim(V.uGlobal.uMachine!Job,V.ODBC.conx!rstOps.FieldVal!JOB,V.uGlobal.uMachine!Suffix,V.ODBC.conx!rstOps.FieldVal!SUFFIX,V.uGlobal.uMachine!Seq,V.ODBC.conx!rstOps.FieldVal!SEQ,V.Local.sRet)
+		F.Intrinsic.Control.If(V.Local.sRet,<>,"")
+			F.Intrinsic.String.Split(V.Local.sRet,"*!*",V.Local.sRet)
+			V.Local.iPos.Set(V.Local.sRet(0).Long)
+	'		F.Intrinsic.Control.CallSub(Evaluate_labor,"sJob",V.ODBC.conx!rstOps.FieldVal!JOB,"sSuffix",V.ODBC.conx!rstOps.FieldVal!SUFFIX)
+			F.Intrinsic.Control.If(V.uGlobal.uMachine(v.Local.iPos)!Machine,<>,V.ODBC.conx!rstOps.FieldVal!PART)
+				F.Intrinsic.Debug.SetLA("Swapping WCs on ",V.ODBC.conx!rstOps.FieldVal!JOB,"-",V.ODBC.conx!rstOps.FieldVal!SUFFIX," Seq: ",V.ODBC.conx!rstOps.FieldVal!SEQ,".  Replacing ",V.ODBC.conx!rstOps.FieldVal!PART," with ",V.uGlobal.uMachine(v.Local.iPos)!Machine)
+				F.Intrinsic.Control.CallSub(Dl,"sJob",V.ODBC.conx!rstOps.FieldVal!JOB,"sSuffix",V.ODBC.conx!rstOps.FieldVal!SUFFIX)
+				F.ODBC.conx!rstOps.Set!PART(V.uGlobal.uMachine(v.Local.iPos)!Machine)
+				F.ODBC.conx!rstOps.Update
+			F.Intrinsic.Control.EndIf
+	'	F.Intrinsic.Control.Else
+	'		F.Intrinsic.Debug.SetLA("No work was done on ",V.ODBC.conx!rstOps.FieldVal!JOB,"-",V.ODBC.conx!rstOps.FieldVal!SUFFIX," Seq: ",V.ODBC.conx!rstOps.FieldVal!SEQ,".")
+	'		F.Intrinsic.Control.CallSub(Dl,"sJob",V.ODBC.conx!rstOps.FieldVal!JOB,"sSuffix",V.ODBC.conx!rstOps.FieldVal!SUFFIX)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+	F.ODBC.conx!rstOps.MoveNext
+F.Intrinsic.Control.Loop
+F.ODBC.conx!rstOps.Close
+
+V.uGlobal.uMachine.Redim(-1,-1)
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Swap_WCs_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.Swap_WCs.End
+
+Program.Sub.Evaluate_Hours.Start
+'  	#2 - WC for run-times that exceed X hours boosted by YYY from its base priority. Multiple values per WC can be entered. This will be based on a new table and a GAB script for inputting the boost value based on WC run-times.
+V.Local.sError.Declare(String)
+V.Local.sQuery.Declare(String)
+V.Local.fRuntime.Declare(Float)
+V.Local.iSum.Declare(Long)
+V.Local.sSuffix.Declare(String)
+V.Local.sWC.Declare(String)
+V.Local.sJob.Declare(String)
+V.Local.sJobs.Declare(String)
+V.Local.iC.Declare(Long)
+V.Local.iUB.Declare(Long,-1)
+V.Local.sRet.Declare(String)
+V.uLocal.uOps.Declare(Job_ops)
+V.uLocal.uOps.Redim(-1,-1)
+V.Local.sWCRet.Declare(String)
+V.Local.iPos.Declare(Long)
+
+F.Intrinsic.Control.SetErrorHandler("Evaluate_Hours_Err")
+F.Intrinsic.Control.ClearErrors
+
+F.Intrinsic.Control.If(V.uglobal.uBHours.UBound,<,0)
+	F.Intrinsic.Control.ExitSub
+F.Intrinsic.Control.EndIf
+
+'Loops through each Job/Suffix/WC combination in JOB_OPERATIONS
+F.ODBC.Connection!conx.OpenRecordsetRO("rstOps","SELECT DISTINCT JOB, SUFFIX, PART FROM JOB_OPERATIONS WHERE LMO='L' AND FLAG_CLOSED<>'Y' ORDER BY JOB ASC, SUFFIX ASC, PART ASC")
+F.Intrinsic.Control.DoUntil(V.ODBC.conx!rstOps.EOF,=,True)
+	V.Local.sJob.Set(V.ODBC.conx!rstOps.fieldval!JOB)
+	V.Local.sSuffix.Set(V.ODBC.conx!rstOps.fieldval!SUFFIX)
+	V.Local.sWC.Set(V.ODBC.conx!rstOps.fieldval!PART)
+
+	F.Intrinsic.Variable.UDTSeek(V.uGlobal.uBHours!WC,V.Local.sWC,1,V.Local.sWCRet)
+	F.Intrinsic.Control.If(V.Local.sWCRet,<>,"")
+		'If a record for this combo's WC exists in the ATG_MM_HOURS_MAINT table, sums the runtimes for that Job/Suffix/WC combo
+		F.Intrinsic.Control.CallSub(Get_op_runtime,"Job",V.Local.sJob,"Suffix",V.Local.sSuffix,"WC",V.Local.sWC)
+		V.Local.fRuntime.Set(V.Args.fRuntime)
+
+		F.Intrinsic.String.Split(V.Local.sWCRet,"*!*",V.Local.sWCRet)
+		'Loops through ATG_MM_HOURS_MAINT for that WC (in Hours DESC order).  Looks for the greatest HOURS (if any) that the calculated runtime exceeds.  Adds a record to uOps if a record is found with the correct Booster
+		F.Intrinsic.Control.For(V.Local.iC,0,V.Local.sWCRet.UBound,1)
+			V.Local.iPos.Set(V.Local.sWCRet(v.Local.iC))
+			F.Intrinsic.Control.If(V.Local.fRuntime,>=,V.uGlobal.uBHours(V.Local.iPos)!Hours)
+				F.Intrinsic.Math.Add(V.Local.iUB,1,V.Local.iUB)
+				F.Intrinsic.Control.If(V.Local.iUB,=,0)
+					V.uLocal.uOps.Redim(0,0)
+				F.Intrinsic.Control.Else
+					V.uLocal.uOps.RedimPreserve(0,V.Local.iUB)
+				F.Intrinsic.Control.EndIf
+
+				V.uLocal.uOps(v.Local.iUB)!Job.Set(V.Local.sJob)
+				V.uLocal.uOps(v.Local.iUB)!Suffix.Set(V.Local.sSuffix)
+				V.uLocal.uOps(v.Local.iUB)!WC.Set(V.Local.sWC)
+				V.uLocal.uOps(v.Local.iUB)!Runtime.Set(V.Local.fRuntime)
+				V.uLocal.uOps(v.Local.iUB)!Booster.Set(V.uGlobal.uBHours(V.Local.iPos)!Booster)
+
+				F.Intrinsic.Control.ExitFor(V.Local.iC)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.Next(V.Local.iC)
+	F.Intrinsic.Control.EndIf
+	F.ODBC.conx!rstOps.MoveNext
+F.Intrinsic.Control.Loop
+F.ODBC.conx!rstOps.Close
+
+'Loops through uJobs, which contains all jobs w/ recorded base priorities (See Record_Priorities for uJobs build), and adds all recorded Job/Suffix/WC boosters in uOps to the Job/Suffix in uJobs.
+F.Intrinsic.Control.For(V.Local.iC,0,V.uLocal.uOps.UBound,1)
+	F.Intrinsic.Variable.UDTMultiSeekNoTrim(V.uGlobal.uJobs!Job,V.uLocal.uOps(v.Local.iC)!Job,V.uGlobal.uJobs!Suffix,V.uLocal.uOps(v.Local.iC)!Suffix,V.Local.sJobs)
+	
+	F.Intrinsic.Control.If(V.Local.sJobs,<>,"")
+		F.Intrinsic.String.Split(V.Local.sJobs,"*!*",V.Local.sJobs)
+		F.Intrinsic.Math.Add(V.uGlobal.uJobs(v.Local.sJobs(0))!New_Priority,V.uLocal.uOps(v.Local.iC)!Booster,V.Local.iSum)
+		F.Intrinsic.Control.If(V.Local.iSum,>,999)
+			V.Local.iSum.Set(999)
+		F.Intrinsic.Control.EndIf
+		V.uGlobal.uJobs(v.Local.sJobs(0))!New_Priority.Set(V.Local.iSum)
+		V.uGlobal.uJobs(v.Local.sJobs(0))!bDirty.set(1)
+		F.Intrinsic.Debug.SetLA("Adding a Booster of ",V.uLocal.uOps(v.Local.iC)!Booster," to ",V.uGlobal.uJobs(v.Local.sJobs(0))!Job,"-",V.uGlobal.uJobs(v.Local.sJobs(0))!Suffix,".  The WC ",V.uLocal.uOps(v.Local.iC)!WC," had a runtime of ",V.uLocal.uOps(v.Local.iC)!Runtime)
+		F.Intrinsic.Control.CallSub(Dl,"sJob",V.uLocal.uOps(v.Local.iC)!Job,"sSuffix",V.uLocal.uOps(v.Local.iC)!Suffix)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.Variable.UDTMultiSeekNoTrim(V.uGlobal.uallJobs!Job,V.uLocal.uOps(v.Local.iC)!Job,V.uGlobal.uallJobs!Suffix,V.uLocal.uOps(v.Local.iC)!Suffix,V.Local.sRet)
+		F.Intrinsic.Control.If(V.Local.sRet,=,"")
+			F.Intrinsic.Debug.SetLA("Error:  Unable to find uJobs match from uOps(",V.Local.iC,").  Job: ",V.uLocal.uOps(v.Local.iC)!Job,"-",V.uLocal.uOps(v.Local.iC)!Suffix)
+			F.Intrinsic.Control.CallSub(Dl,"sJob",V.uLocal.uOps(v.Local.iC)!Job,"sSuffix",V.uLocal.uOps(v.Local.iC)!Suffix)
+		F.Intrinsic.Control.Else
+			F.Intrinsic.String.Split(V.Local.sRet,"*!*",V.Local.sRet)
+			V.Local.sRet.Set(V.Local.sRet(0))
+			F.Intrinsic.Control.If(V.uGlobal.uAllJobs(v.Local.sRet.Long)!CloseDate,<>,"1900")
+				F.Intrinsic.Debug.SetLA("Error:  Found match in uAllJobs but not uJobs and Job is not closed from uOps(",V.Local.iC,").  Job: ",V.uLocal.uOps(v.Local.iC)!Job,"-",V.uLocal.uOps(v.Local.iC)!Suffix)
+				F.Intrinsic.Control.CallSub(Dl,"sJob",V.uLocal.uOps(v.Local.iC)!Job,"sSuffix",V.uLocal.uOps(v.Local.iC)!Suffix)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Next(V.Local.iC)
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Evaluate_Hours_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.Evaluate_Hours.End
+
+Program.Sub.Get_Op_Runtime.Start
+V.Local.sError.Declare(String)
+V.Local.sQuery.Declare(String)
+V.Local.fRuntime.Declare(Float)
+
+F.Intrinsic.Control.SetErrorHandler("Get_Op_Runtime_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.fRuntime.Set(0)
+F.Intrinsic.String.Concat("SELECT HOURS_ESTIMATED FROM JOB_OPERATIONS WHERE LMO='L' AND FLAG_CLOSED<>'Y' AND JOB='",V.args.Job,"' AND SUFFIX='",V.Args.Suffix,"' AND PART='",V.Args.WC,"'",V.Local.sQuery)
+F.ODBC.Connection!conx.OpenRecordsetRO("rstRuntime",V.Local.sQuery)
+F.Intrinsic.Control.DoUntil(V.ODBC.conx!rstRuntime.EOF,=,True)
+	F.Intrinsic.Math.Add(V.Local.fRuntime,V.ODBC.conx!rstRuntime.FieldValFloat!HOURS_ESTIMATED,V.Local.fRuntime)
+	F.ODBC.conx!rstRuntime.MoveNext
+F.Intrinsic.Control.Loop
+F.ODBC.conx!rstRuntime.Close
+
+F.Intrinsic.Variable.AddRV("fRuntime",V.Local.fRuntime)
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Get_Op_Runtime_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.Get_Op_Runtime.End
+
+Program.Sub.DL.Start
+V.Local.bExists.Declare(Boolean)
+V.Local.sLine.Declare(String)
+V.Local.sText.Declare(String)
+V.Local.sJobs.Declare(String)
+V.Local.iErr.Declare(Long)
+V.Local.bError.Declare(Boolean)
+V.Static.sStart.Declare(String)
+V.Static.sEnd.Declare(String)
+V.static.iErrors.declare(Long)
+V.Static.sLastErr.Declare(String)
+
+F.Intrinsic.Control.If(V.Global.sFile,=,"")
+	F.Intrinsic.String.Format(V.Ambient.Now,"MMDDYYYYHHNNSS",V.Global.sFile)
+	F.Intrinsic.String.Concat(V.Caller.TempDir,"\MM_Boost_Priority_",V.Global.sFile,".txt",V.Global.sFile)
+F.Intrinsic.Control.EndIf
+
+V.Local.bError.Set(False)
+F.Intrinsic.String.Instr(V.Ambient.LastAction.ucase,"ERROR",,V.Local.iErr)
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	F.Intrinsic.String.Concat(V.Ambient.Date," ",V.Ambient.Time,V.Static.sLastErr)
+	F.Intrinsic.Math.Add(V.Static.iErrors,1,V.Static.iErrors)
+	V.Local.bError.Set(True)
+F.Intrinsic.Control.ElseIf(V.Local.iErr,<>,0)
+	F.Intrinsic.String.Concat(V.Ambient.Date," ",V.Ambient.Time,V.Static.sLastErr)
+	F.Intrinsic.Math.Add(V.Static.iErrors,1,V.Static.iErrors)
+	V.Local.bError.Set(True)
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.If(V.Global.bLog,=,True)
+	F.Intrinsic.String.Concat(V.Ambient.Date," ",V.Ambient.Time," - ",V.Ambient.LastAction,V.Local.sLine)
+	F.Intrinsic.File.Exists(V.Global.sFile,V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists,=,True)
+		F.Intrinsic.File.Append2FileNewLine(V.Global.sFile,V.Local.sLine)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.File.String2File(V.Global.sFile,V.Local.sLine)
+	F.Intrinsic.Control.EndIf
+
+	F.Intrinsic.Control.If(V.Args.sJob,<>,"")
+		F.Intrinsic.Variable.UDTMultiSeekNoTrim(V.uGlobal.uJobs!Job,V.Args.sJob,V.uGlobal.uJobs!Suffix,V.Args.sSuffix,V.Local.sJobs)
+		F.Intrinsic.Control.If(V.Local.sJobs,<>,"")
+			F.Intrinsic.String.Split(V.Local.sJobs,"*!*",V.Local.sJobs)
+			F.Intrinsic.Control.If(V.uGlobal.uJobs(v.Local.sJobs(0))!Log,=,"")
+				V.uGlobal.uJobs(v.Local.sJobs(0))!Log.Set(V.Local.sLine)
+			F.Intrinsic.Control.Else
+				F.Intrinsic.String.Concat(V.uGlobal.uJobs(v.Local.sJobs(0))!Log,V.Ambient.NewLine,V.Local.sLine,V.uGlobal.uJobs(v.Local.sJobs(0))!Log)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.Else
+			F.Intrinsic.Math.Add(V.Static.iErrors,1,V.Static.iErrors)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.ElseIf(V.Local.bError,=,True)
+	F.Intrinsic.String.Concat(V.Ambient.Date," ",V.Ambient.Time," - ",V.Ambient.LastAction,V.Local.sLine)
+	F.Intrinsic.File.Exists(V.Global.sFile,V.Local.bExists)
+	F.Intrinsic.Control.If(V.Local.bExists,=,True)
+		F.Intrinsic.File.Append2FileNewLine(V.Global.sFile,V.Local.sLine)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.File.String2File(V.Global.sFile,V.Local.sLine)
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.If(V.Ambient.LastAction,=,"***Ending Program***")
+	F.Intrinsic.Control.If(V.Static.iErrors,>,0)
+		F.Intrinsic.File.File2String(V.Global.sFile,V.Local.sText)
+		F.Intrinsic.String.Concat("ERRORS ",V.Static.iErrors," HAVE OCCURRED!  Last Error at ",V.Static.sLastErr,V.Ambient.NewLine,V.Local.sText,V.Local.sText)
+		F.Intrinsic.File.String2File(V.Global.sFile,V.Local.sText)
+	F.Intrinsic.Control.ElseIf(V.Global.bLog,=,True)
+		F.Intrinsic.Control.CallSub(Dl_sort_jobs)
+		F.Intrinsic.String.Concat(V.Static.sStart,V.Args.sLog,V.Ambient.NewLine,V.Static.sEnd,V.Ambient.NewLine,V.Local.sLine,V.Local.sText)
+		F.Intrinsic.File.String2File(V.Global.sFile,V.Local.sText)
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.ElseIf(V.Ambient.LastAction,=,"***Starting Program***")
+	V.Static.sStart.Set(V.Local.sLine)
+F.Intrinsic.Control.ElseIf(V.Ambient.LastAction,=,"APS 83 called.")
+	V.Static.sEnd.Set(V.Local.sLine)
+F.Intrinsic.Control.EndIf
+
+Program.Sub.DL.End
+
+Program.Sub.Boost_Jobs.Start
+'  C. The script will then evaluate the need for boosting the priority on the jobs based on a new table.
+'  	#1 -Sub: Evaluate_Days (called from Sub Record_Priorities): work currently scheduled to start within the next x days will be boosted by AAA from its base priority. This will be based on a new table and a GAB script for inputting the boost value based on days.
+'  	#2 -Sub: Evaluate_Hours (called below):  WC for run-times that exceed X hours boosted by YYY from its base priority. Multiple values per WC can be entered. This will be based on a new table and a GAB script for inputting the boost value based on WC run-times.
+'  	#3 -Sub: Evaluate_Labor_Done (called from Sub Swap_WCs) If labor is already charged to the job then an additional boost value of Z could be apllied to the already boosted value from 1 and 2.  The ZZZ value will be a global value that could be applied to all job.
+
+V.Local.sError.Declare(String)
+V.Local.sJobs.Declare(String)
+V.Local.iBooster.Declare(Long)
+V.Local.sPriority.Declare(String)
+V.Local.sParams.Declare(String)
+V.Local.sQuery.Declare(String)
+V.Local.iC.Declare(Long)
+V.Local.iTemp.Declare(Long)
+V.Local.sTemp.Declare(String)
+V.Local.sNewPriority.Declare(String)
+V.Local.sDate1.Declare(String)
+V.Local.sDate2.Declare(String)
+V.Local.sRet.Declare(String)
+V.Local.iParent.Declare(Long)
+
+F.Intrinsic.Control.SetErrorHandler("Boost_Jobs_Err")
+F.Intrinsic.Control.ClearErrors
+
+F.Intrinsic.Control.CallSub(Boost_bom_parents)
+
+F.Intrinsic.Variable.UDTMultiFlag(V.uGlobal.uJobs!bDirty,0)
+F.Intrinsic.Variable.UDTDeleteFlagged(V.uGlobal.uJobs)
+F.Intrinsic.Control.For(V.Local.iC,0,V.uGlobal.uJobs.UBound,1)
+	F.Intrinsic.String.Concat("Boosting Jobs: Updating only jobs with changed priorities...",V.Ambient.NewLine,V.Local.iC," of  ",V.uGlobal.uJobs.UBound," jobs that have been boosted",V.Local.sTemp)
+
+	F.Intrinsic.Control.If(V.uGlobal.uJobs(V.Local.iC)!New_Priority,<>,V.uGlobal.uJobs(V.Local.iC)!Current_Priority)
+		F.Intrinsic.Math.Sub(V.uGlobal.uJobs(V.Local.iC)!New_Priority,V.uGlobal.uJobs(V.Local.iC)!Base_Priority,V.Local.iBooster)
+		F.Intrinsic.String.LPad(V.uGlobal.uJobs(V.Local.iC)!New_Priority,"0",3,V.Local.sNewPriority)
+		F.Intrinsic.String.Concat("UPDATE JOB_HEADER SET PRIORITY='",V.Local.sNewPriority,"' WHERE JOB='",V.uGlobal.uJobs(V.Local.iC)!Job,"' AND SUFFIX='",V.uGlobal.uJobs(V.Local.iC)!Suffix,"'",V.Local.sQuery)
+		F.Intrinsic.Debug.SetLA(V.Local.sQuery)
+		F.ODBC.Connection!conx.Execute(V.Local.sQuery)
+		F.Intrinsic.String.Format(V.uGlobal.uJobs(V.Local.iC)!DateStart,"YYMMDD",V.Local.sDate1)
+		F.Intrinsic.String.Format(V.uGlobal.uJobs(V.Local.iC)!DueDate,"YYMMDD",V.Local.sDate2)
+		F.Intrinsic.String.Concat(V.Local.sDate1,"!*!",V.Local.sDate2,"!*!",V.uGlobal.uJobs(V.Local.iC)!Job,"!*!",V.uGlobal.uJobs(V.Local.iC)!Suffix,"!*! !*!B",V.Local.sParams)
+		F.Intrinsic.Debug.SetLA("(Reschedule) Updated the priority of ",V.uGlobal.uJobs(V.Local.iC)!Job,"-",V.uGlobal.uJobs(V.Local.iC)!Suffix," from ",V.uGlobal.uJobs(V.Local.iC)!Current_Priority," to ",V.uGlobal.uJobs(V.Local.iC)!New_Priority)
+		F.Intrinsic.String.Concat(V.Local.sTemp,V.Ambient.NewLine,V.Ambient.LastAction,V.Local.sTemp)
+		F.Intrinsic.Debug.SetLA(V.Ambient.LastAction,".  This job was boosted a total of ",V.Local.iBooster,", up from the original base priority of ",V.uGlobal.uJobs(V.Local.iC)!Base_Priority)
+		F.Intrinsic.Control.CallSub(Dl,"sJob",V.uGlobal.uJobs(V.Local.iC)!Job,"sSuffix",V.uGlobal.uJobs(V.Local.iC)!Suffix)
+	F.Intrinsic.Control.EndIf
+	F.Intrinsic.UI.ChangeWaitStatus(V.Local.sTemp,V.Local.iC,0,V.uGlobal.uJobs.UBound)
+F.Intrinsic.Control.Next(V.Local.iC)
+
+
+'  D. The GAB script will then call the SYS050 process to download the scheduling files and then call the APS 83 schedule.
+F.Intrinsic.Control.If(V.Global.bAPS,=,True)
+	F.Intrinsic.String.Format(V.Global.AppRun,"YYYYMMDD",V.Local.sParams)
+	F.Intrinsic.String.Concat("SI!*!",V.Local.sParams,"!*!1",V.Local.sParams)
+	F.Intrinsic.UI.InvokeWaitDialog("Downloading Scheduling files...","Priority Booster")
+	F.Global.General.CallWrapperSync(500000,V.Local.sParams)
+	V.Local.sParams.Set("")
+	F.Intrinsic.UI.InvokeWaitDialog("Running APS #83...","Priority Booster")
+	F.Global.General.CallWrapperSync(500010,V.Local.sParams)
+	F.Intrinsic.Debug.SetLA("APS 83 called.")
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Boost_Jobs_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.Boost_Jobs.End
+
+Program.Sub.DL_Sort_Jobs.Start
+V.Local.iC.Declare(Long)
+V.Local.sText.Declare(String)
+V.Local.iUB.Declare(Long,-1)
+V.Local.sArr.Declare(String)
+V.Local.sArr.Redim(-1,-1)
+
+F.Intrinsic.Control.For(V.Local.iC,0,V.uGlobal.uJobs.UBound,1)
+	F.Intrinsic.Control.If(V.uGlobal.uJobs(v.Local.iC)!Log,<>,"")
+'		F.Intrinsic.String.Concat(V.Local.sText,V.Ambient.NewLine,V.uGlobal.uJobs(v.Local.iC)!Log,V.Local.sText)
+		F.Intrinsic.Math.Add(V.Local.iUB,1,V.Local.iUB)
+		F.Intrinsic.Control.If(V.Local.iUB,=,0)
+			V.Local.sArr.Redim(0,0)
+		F.Intrinsic.Control.Else
+			V.Local.sArr.RedimPreserve(0,V.Local.iUB)
+		F.Intrinsic.Control.EndIf
+		V.Local.sArr(v.Local.iUB).Set(V.uGlobal.uJobs(v.Local.iC)!Log)
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Next(V.Local.iC)
+
+F.Intrinsic.String.Join(V.Local.sArr,V.Ambient.NewLine,V.Local.sText)
+F.Intrinsic.Variable.AddRV("sLog",V.Local.sText)
+
+Program.Sub.DL_Sort_Jobs.End
+
+Program.Sub.Load_UDTs.Start
+
+F.ODBC.Connection!conx.OpenRecordsetRO("rstJobs","SELECT JOB,SUFFIX,DATE_CLOSED FROM V_JOB_HEADER ORDER BY JOB ASC, SUFFIX ASC")
+F.Intrinsic.Control.If(V.ODBC.conx!rstJobs.EOF,<>,True)
+	F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rstJobs","v.uglobal.ualljobs",False)
+F.Intrinsic.Control.EndIf
+F.ODBC.conx!rstJobs.Close
+
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!CloseDate,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!DueDate,"DATE_DUE")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!DateStart,"DATE_START")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Base_Priority,"PRIORITY")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Recorded,"RECORDED")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!New_Priority,"PRIORITY")
+
+'Jobs
+V.uGlobal.uJobs.Redim(-1,-1)
+F.ODBC.Connection!conx.OpenRecordsetRO("rstJobs","SELECT J.JOB, J.SUFFIX, J.DATE_DUE, J.DATE_START, J.PRIORITY, 0 AS RECORDED FROM JOB_HEADER J LEFT JOIN ATG_MM_BASE_PRIORITY M ON J.JOB=M.JOB and J.SUFFIX=M.SUFFIX WHERE M.JOB is null AND (J.date_Closed ='000000' or J.date_closed='')")
+F.Intrinsic.Control.If(V.ODBC.conx!rstJobs.EOF,<>,True)
+	F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rstJobs","v.uglobal.ujobs",False)
+F.Intrinsic.Control.EndIf
+F.ODBC.conx!rstJobs.Close
+
+'days
+V.uGlobal.uBDays.Redim(-1,-1)
+F.ODBC.Connection!conx.OpenRecordsetRO("rst","SELECT * FROM ATG_MM_DAYS_MAINT ORDER BY DAYS ASC")
+F.Intrinsic.Control.If(V.ODBC.conx!rst.EOF,<>,True)
+	F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rst","v.uglobal.uBDays",False)
+F.Intrinsic.Control.EndIf
+F.ODBC.conx!rst.Close
+
+'hours?
+V.uGlobal.uBHours.Redim(-1,-1)
+F.ODBC.Connection!conx.OpenRecordsetRO(" rst","SELECT * FROM ATG_MM_HOURS_MAINT ORDER BY WC ASC,HOURS DESC")
+F.Intrinsic.Control.If(V.ODBC.conx!rst.EOF,<>,True)
+	F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rst","v.uglobal.uBHours",False)
+F.Intrinsic.Control.EndIf
+F.ODBC.conx!rst.Close
+
+F.ODBC.Connection!conx.OpenRecordsetRO("rstBooster","SELECT * FROM ATG_MM_GLOBAL_BOOST")
+F.Intrinsic.Control.If(V.ODBC.conx!rstBooster.EOF,<>,True)
+	V.Global.iGBooster.Set(V.ODBC.conx!rstBooster.FieldValLong!GLOBAL_BOOSTER)
+	V.Global.bLaborBoost.Set(True)
+F.Intrinsic.Control.EndIf
+F.ODBC.conx!rstBooster.Close
+
+F.ODBC.Connection!conx.OpenRecordsetRO("rstMachine","SELECT JOB,SUFFIX, SEQ, MACHINE FROM JOB_DETAIL WHERE LMO='L' ORDER BY CHARGE_DATE ASC, START_TIME ASC")
+F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rstMachine","v.uGlobal.uMachine",False)
+F.ODBC.conx!rstMachine.Close
+
+F.ODBC.Connection!conx.OpenRecordsetRO("rst","SELECT DISTINCT JOB, SUFFIX, PART FROM JOB_OPERATIONS WHERE LMO='L' AND FLAG_CLOSED<>'Y' ORDER BY JOB ASC, SUFFIX ASC, PART ASC")
+F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rst","v.uglobal.uJobO",False)
+F.ODBC.conx!rst.Close
+
+Program.Sub.Load_UDTs.End
+
+Program.Sub.Record_Priorities.Start
+'  B. The priority will be the copied into a new table keyed of job, and suffix storing the base priority.
+V.Local.sError.Declare(String)
+V.Local.sQuery.Declare(String)
+V.Local.sJobs.Declare(String)
+V.Local.iC.Declare(Long)
+
+F.Intrinsic.Control.SetErrorHandler("Record_Priorities_Err")
+F.Intrinsic.Control.ClearErrors
+
+
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!DueDate,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!DateStart,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Recorded,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!New_Priority,"")
+F.Intrinsic.Control.If(V.uGlobal.uJobs.UBound,>=,0)
+	F.ODBC.Connection!conx.OpenRecordsetRW("rstJobs","SELECT * FROM ATG_MM_BASE_PRIORITY")
+	F.Intrinsic.Variable.SaveUDTToRecordset("conx","rstJobs","v.uGlobal.uJobs")
+	F.ODBC.conx!rstJobs.Close
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Base_Priority,"NPRIORITY")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!bDirty,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!CloseDate,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Current_Priority,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Log,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!DueDate,"DATE_DUE")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!DateStart,"DATE_ORIG_DUE")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Recorded,"RECORDED")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!New_Priority,"NPRIORITY")
+'F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!New_Priority,"")
+'F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Current_Priority,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uGlobal.uJobs!Current_Priority,"CPRIORITY")
+
+V.Local.sQuery.Set("DELETE FROM ATG_MM_BASE_PRIORITY M WHERE CONCAT(LEFT(CONCAT(JOB, REPLICATE(' ',6)),6),LEFT(CONCAT(SUFFIX, REPLICATE(' ',3)),3)) NOT IN (SELECT  CONCAT(LEFT(CONCAT(JOB, REPLICATE(' ',6)),6),LEFT(CONCAT(SUFFIX, REPLICATE(' ',3)),3)) as JOBSUFFIX FROM JOB_HEADER WHERE (date_Closed ='000000' or date_closed=''))")
+
+'F.Intrinsic.Variable.SetUDTFieldDateMask(V.uGlobal.uJobs!DateStart,"YYYYMMDD")
+F.ODBC.Connection!conx.OpenRecordsetRO("rstJobs","SELECT J.JOB, J.SUFFIX, J.DATE_DUE, J.DATE_ORIG_DUE, M.PRIORITY AS NPRIORITY, J.PRIORITY AS CPRIORITY, 1 AS RECORDED FROM V_JOB_HEADER J INNER JOIN ATG_MM_BASE_PRIORITY M ON J.JOB=M.JOB and J.SUFFIX=M.SUFFIX where J.Date_Closed is not null")
+F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rstJobs","v.uglobal.ujobs",False)
+F.ODBC.conx!rstJobs.Close
+
+F.Intrinsic.Control.ExitSub
+F.Intrinsic.Control.Label("Record_Priorities_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.Record_Priorities.End
+
+Program.Sub.Evaluate_Days.Start
+'  	#1 - work currently scheduled to start within the next x days will be boosted by AAA from its base priority. This will be based on a new table and a GAB script for inputting the boost value based on days.
+V.Local.iC.Declare(Long)
+V.Local.iD.Declare(Long)
+V.Local.dStart.Declare(Date)
+V.Local.iDiff.Declare(Long)
+V.Local.bBoost.Declare(Boolean)
+V.Local.bExit.Declare(Boolean)
+V.Local.iSum.Declare(Long)
+V.Local.sTemp.Declare(String)
+V.Local.iDays.Declare(Long)
+V.Local.iMax.Declare(Long)
+V.Local.iFlag.Declare(Long,1)
+
+F.Intrinsic.Control.If(V.uGlobal.uBDays.UBound,<,0)
+	F.Intrinsic.Control.ExitSub
+F.Intrinsic.Control.EndIf
+
+V.Local.iDays.Redim(0,V.uGlobal.uBDays.UBound)
+F.Intrinsic.Control.For(V.Local.iC,0,V.uGlobal.uBDays.UBound,1)
+	V.Local.iDays(v.Local.iC).Set(V.uGlobal.uBDays(v.Local.iC)!Days)
+F.Intrinsic.Control.Next(V.Local.iC)
+
+F.Intrinsic.Control.For(V.Local.iC,0,V.uGlobal.uJobs.UBound,1)
+	F.Intrinsic.String.Concat("Calculating Day Booster: Checking to see if day booster applies to job...",V.Ambient.NewLine,V.Local.iC," of  ",V.uGlobal.uJobs.UBound," open jobs",V.Local.sTemp)
+	F.Intrinsic.Date.DateDiff("d",V.Global.AppRun,V.uGlobal.uJobs(v.Local.iC)!DateStart,V.Local.iDiff)
+
+	V.Local.bBoost.Set(False)
+
+	F.Intrinsic.Control.If(V.Local.iDiff,<=,V.Local.iMax)
+		F.Intrinsic.Control.For(V.Local.iD,0,V.Local.iDays.UBound,1)
+			F.Intrinsic.Control.If(V.Local.iDiff,<=,V.Local.iDays(v.Local.iD))
+				V.Local.bBoost.Set(True)
+				F.Intrinsic.Control.ExitFor(V.Local.iD)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.Next(V.Local.iD)
+	
+		F.Intrinsic.Control.If(V.Local.bBoost,=,True)
+			F.Intrinsic.Math.Add(V.uGlobal.uJobs(v.Local.iC)!New_Priority,V.uGlobal.uBDays(v.Local.iD)!Booster,V.Local.iSum)
+			F.Intrinsic.Control.If(V.Local.iSum,>,999)
+				V.Local.iSum.Set(999)
+			F.Intrinsic.Control.EndIf
+			
+			F.Intrinsic.Debug.SetLA("Adding a Booster of ",V.uGlobal.uBDays(v.Local.iD)!Booster," to ",V.uGlobal.uJobs(V.Local.iC)!Job,"-",V.uGlobal.uJobs(V.Local.iC)!Suffix,".  The Start Date is in ",V.Local.iDiff," days.")
+			F.Intrinsic.Control.If(V.Global.bLog,=,True)
+				F.Intrinsic.Control.CallSub(Dl,"sJob",V.uGlobal.uJobs(V.Local.iC)!Job,"sSuffix",V.uGlobal.uJobs(V.Local.iC)!Suffix)
+			F.Intrinsic.Control.EndIf
+			F.Intrinsic.String.Concat(V.Local.sTemp,V.Ambient.NewLine,V.Ambient.LastAction,V.Local.sTemp)
+			
+			V.uGlobal.uJobs(v.Local.iC)!New_Priority.Set(V.Local.iSum)
+			V.uGlobal.uJobs(v.Local.iC)!bDirty.set(V.Local.iFlag)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+
+	F.Intrinsic.UI.ChangeWaitStatus(V.Local.sTemp,V.Local.iC,0,V.uGlobal.uJobs.UBound)
+F.Intrinsic.Control.Next(V.Local.iC)
+
+Program.Sub.Evaluate_Days.End
+
+Program.Sub.Evaluate_Labor.Start
+
+'  	#3 - If labor is already charged to the job then an additional boost value of Z could be apllied to the already boosted value from 1 and 2.  The ZZZ value will be a global value that could be applied to all job.
+V.Local.sError.Declare(String)
+V.Local.iSum.Declare(Long)
+V.Local.sJobs.Declare(String)
+V.Local.sTemp.Declare(String)
+V.Local.iC.Declare(Long)
+V.Local.sRet.Declare(String)
+V.uLocal.uLabor.Declare(Jobdmachine)
+V.Local.iFlag.Declare(Long,1)
+V.Local.iPos.Declare(Long)
+'V.Local.sLast.Declare(String)
+
+F.Intrinsic.Control.SetErrorHandler("Evaluate_Labor_Done_Err")
+F.Intrinsic.Control.ClearErrors
+
+F.Intrinsic.Control.If(V.Global.bLaborBoost,=,False)
+	F.Intrinsic.Control.ExitSub
+F.Intrinsic.Control.EndIf
+
+F.Intrinsic.Variable.SetUDTFieldReference(V.uLocal.uLabor!SEQ,"")
+F.Intrinsic.Variable.SetUDTFieldReference(V.uLocal.uLabor!MACHINE,"")
+F.ODBC.Connection!conx.OpenRecordsetRO("rstMachine","SELECT DISTINCT JOB,SUFFIX FROM JOB_DETAIL WHERE LMO='L' ORDER BY CHARGE_DATE ASC, START_TIME ASC")
+F.Intrinsic.Variable.LoadUDTFromRecordset("conx","rstMachine","v.uLocal.uLabor",False)
+F.ODBC.conx!rstMachine.Close
+'F.Intrinsic.Variable.UDTCopy(V.uGlobal.uMachine,V.uLocal.uLabor,False)
+'F.Intrinsic.Variable.UDTMultiFlagDuplicates(V.uLocal.uLabor!Job,V.uLocal.uLabor!Suffix,V.uLocal.uLabor!Seq)
+'F.Intrinsic.Variable.UDTDeleteFlagged(V.uLocal.uLabor)
+F.Intrinsic.Control.For(V.Local.iC,0,V.uLocal.uLabor.UBound,1)
+	F.Intrinsic.Variable.UDTMultiSeekNoTrim(V.uGlobal.uJobs!Job,V.uLocal.uLabor(v.Local.iC)!Job,V.uGlobal.uJobs!Suffix,V.uLocal.uLabor(v.Local.iC)!Suffix,V.Local.sJobs)
+	F.Intrinsic.String.Concat("Calculating Labor Booster: Verifying job with detail record is an open job...",V.Ambient.NewLine,V.Local.iC," of  ",V.uLocal.uLabor.UBound," jobs with detail records found",V.Local.sTemp)
+	F.Intrinsic.Control.If(V.Local.sJobs,<>,"")
+		F.Intrinsic.String.Split(V.Local.sJobs,"*!*",V.Local.sJobs)
+		V.Local.iPos.Set(V.Local.sJobs(0))
+		F.Intrinsic.Debug.SetLA("Adding a Global Booster of ",V.global.iGBooster," to ",V.uGlobal.uJobs(v.Local.iPos)!Job,"-",V.uGlobal.uJobs(V.Local.iPos)!Suffix,".  Labor has been done to this job.")
+		F.Intrinsic.String.Concat(V.Local.sTemp,V.Ambient.NewLine,V.Ambient.LastAction,V.Local.sTemp)
+		F.Intrinsic.UI.ChangeWaitStatus(V.Local.sTemp,V.Local.iC,0,V.uLocal.uLabor.UBound)
+		F.Intrinsic.Control.If(V.Global.bLog,=,True)
+			F.Intrinsic.Control.CallSub(Dl,"sJob",V.uGlobal.uJobs(V.Local.iPos)!Job,"sSuffix",V.uGlobal.uJobs(V.Local.iPos)!Suffix)
+		F.Intrinsic.Control.EndIf
+		
+		F.Intrinsic.Math.Add(V.uGlobal.uJobs(V.Local.iPos)!New_Priority,V.global.iGBooster,V.Local.iSum)
+		F.Intrinsic.Control.If(V.Local.iSum,>,999)
+			V.Local.iSum.Set(999)
+		F.Intrinsic.Control.EndIf
+		V.uGlobal.uJobs(V.Local.iPos)!New_Priority.Set(V.Local.iSum)
+		V.uGlobal.uJobs(V.Local.iPos)!bDirty.set(V.Local.iFlag)
+	F.Intrinsic.Control.Else
+		F.Intrinsic.UI.ChangeWaitStatus(V.Local.sTemp,V.Local.iC,0,V.uLocal.uLabor.UBound)
+	F.Intrinsic.Control.EndIf
+F.Intrinsic.Control.Next(V.Local.iC)
+F.Intrinsic.Debug.SetLA("Finished Global Boosters")
+F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Evaluate_Labor_Done_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	F.Intrinsic.Variable.AddRV("bOpen",False)
+	Function.Intrinsic.String.Concat("Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	F.Intrinsic.Debug.SetLA("***ERROR:",V.Local.sError)
+	F.Intrinsic.Control.CallSub(Dl,"sJob","","sSuffix","")
+Function.Intrinsic.Control.EndIf
+
+
+Program.Sub.Evaluate_Labor.End
+
+Program.Sub.Boost_Bom_Parents.Start
+V.Local.sError.Declare(String)
+V.Local.sJobs.Declare(String)
+V.Local.iBooster.Declare(Long)
+V.Local.sPriority.Declare(String)
+V.Local.sParams.Declare(String)
+V.Local.sQuery.Declare(String)
+V.Local.iC.Declare(Long)
+V.Local.iTemp.Declare(Long)
+V.Local.sTemp.Declare(String)
+V.Local.sNewPriority.Declare(String)
+V.Local.iJ.Declare(Long)
+V.Local.sRet.Declare(String)
+V.Local.iParent.Declare(Long)
+V.uLocal.uParents.Declare(Jobs)
+V.Local.iMaxPriority.Declare(Long)
+V.Local.sPm.Declare(String)
+
+V.uLocal.uParents.Redim(-1,-1)
+F.Intrinsic.Variable.UDTCopy(V.uGlobal.uJobs,V.uLocal.uParents,False)
+F.Intrinsic.Variable.UDTMultiFlag(V.uLocal.uParents!Suffix,"<>::000")
+F.Intrinsic.Variable.UDTDeleteFlagged(V.uLocal.uParents)
+V.Local.sTemp.Set("Pushing highest BOM child priorities to BOM Parent...")
+F.Intrinsic.Control.For(V.Local.iC,0,V.uLocal.uParents.UBound,1)
+	'F.Intrinsic.String.Concat(">::",V.uLocal.uParents(v.Local.iC)!New_Priority,V.Local.sPm)
+	'F.Intrinsic.Variable.UDTMultiSeek(V.uGlobal.uJobs!Job,V.uLocal.uParents(v.Local.iC)!Job,V.uGlobal.uJobs!Suffix,"<>::000",V.uGlobal.uJobs!New_Priority,V.Local.sPm,V.Local.sRet)
+	F.Intrinsic.Variable.UDTMultiSeek(V.uGlobal.uJobs!Job,V.uLocal.uParents(v.Local.iC)!Job,V.uGlobal.uJobs!Suffix,"<>::000",V.Local.sRet)
+
+	F.Intrinsic.Control.If(V.Local.sRet,<>,"")
+		V.Local.iMaxPriority.Set(V.uLocal.uParents(v.Local.iC)!New_Priority)
+		F.Intrinsic.String.Split(V.Local.sRet,"*!*",V.Local.sRet)
+		F.Intrinsic.Control.For(V.Local.iJ,0,V.Local.sRet.UBound,1)
+			V.Local.iTemp.Set(V.Local.sRet(v.Local.iJ))
+			F.Intrinsic.Control.If(V.uGlobal.uJobs(v.Local.iTemp)!New_Priority,>,V.Local.iMaxPriority)
+				V.Local.iMaxPriority.Set(V.uGlobal.uJobs(v.Local.iTemp)!New_Priority)
+			F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.Next(V.Local.iJ)
+		F.Intrinsic.Control.If(V.Local.iMaxPriority,>,999)
+			V.Local.iMaxPriority.Set(999)
+		F.Intrinsic.Control.EndIf
+		F.Intrinsic.Control.If(V.Local.iMaxPriority,>,V.uLocal.uParents(v.Local.iC)!New_Priority)
+			F.Intrinsic.Debug.SetLA("Pushing highest BOM child priority of ",V.Local.iMaxPriority," to BOM Parent ",V.uLocal.uParents(V.Local.iC)!Job,"-",V.uLocal.uParents(V.Local.iC)!Suffix)
+			F.Intrinsic.Control.CallSub(Dl,"sJob",V.uLocal.uParents(V.Local.iC)!Job,"sSuffix",V.uLocal.uParents(V.Local.iC)!Suffix)
+			F.Intrinsic.String.Concat(V.Local.sTemp,V.Ambient.NewLine,V.Ambient.LastAction,V.Local.sTemp)
+			F.Intrinsic.Variable.UDTMultiSeekSet(V.uGlobal.uJobs!Job,V.uLocal.uParents(V.Local.iC)!Job,V.uGlobal.uJobs!Suffix,V.uLocal.uParents(V.Local.iC)!Suffix,V.uGlobal.uJobs!New_Priority,V.Local.iMaxPriority)
+			F.Intrinsic.Variable.UDTMultiSeekSet(V.uGlobal.uJobs!Job,V.uLocal.uParents(V.Local.iC)!Job,V.uGlobal.uJobs!Suffix,V.uLocal.uParents(V.Local.iC)!Suffix,V.uGlobal.uJobs!bDirty,1)
+		F.Intrinsic.Control.ElseIf(V.Local.iMaxPriority,=,V.uLocal.uParents(v.Local.iC)!New_Priority)
+			F.Intrinsic.Debug.SetLA("Keeping priority ",V.Local.iMaxPriority," of BOM Parent ",V.uLocal.uParents(V.Local.iC)!Job,"-",V.uLocal.uParents(V.Local.iC)!Suffix," because child priorities are less than parent.")
+			F.Intrinsic.Control.CallSub(Dl,"sJob",V.uLocal.uParents(V.Local.iC)!Job,"sSuffix",V.uLocal.uParents(V.Local.iC)!Suffix)
+			F.Intrinsic.String.Concat(V.Local.sTemp,V.Ambient.NewLine,V.Ambient.LastAction,V.Local.sTemp)
+			F.Intrinsic.Variable.UDTMultiSeekSet(V.uGlobal.uJobs!Job,V.uLocal.uParents(V.Local.iC)!Job,V.uGlobal.uJobs!Suffix,V.uLocal.uParents(V.Local.iC)!Suffix,V.uGlobal.uJobs!New_Priority,V.Local.iMaxPriority)
+			F.Intrinsic.Variable.UDTMultiSeekSet(V.uGlobal.uJobs!Job,V.uLocal.uParents(V.Local.iC)!Job,V.uGlobal.uJobs!Suffix,V.uLocal.uParents(V.Local.iC)!Suffix,V.uGlobal.uJobs!bDirty,1)
+		F.Intrinsic.Control.EndIf
+	F.Intrinsic.Control.EndIf
+	F.Intrinsic.UI.ChangeWaitStatus(V.Local.sTemp,V.Local.iC,0,V.uGlobal.uJobs.UBound)
+F.Intrinsic.Control.Next(V.Local.iC)
+
+Program.Sub.Boost_Bom_Parents.End
+
+
